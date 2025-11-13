@@ -15,9 +15,9 @@
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"/>
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-    ```
 
+    <!-- NEW: Biometric permission -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
     <application
         android:allowBackup="true"
@@ -29,15 +29,21 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.SMS">
 
+        <!-- NEW: BiometricAuthActivity is now the launcher (entry point) -->
         <activity
-            android:name=".SendActivity"
+            android:name=".BiometricAuthActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- MODIFIED: SendActivity is no longer the launcher -->
+        <activity
+            android:name=".SendActivity"
+            android:exported="false" />
+
     </application>
 
 </manifest>
