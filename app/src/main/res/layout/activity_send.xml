@@ -38,12 +38,22 @@
                 android:layout_marginBottom="8dp"/>
 
             <TextView
+                android:id="@+id/tvBluetoothStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="⚪ Bluetooth: No conectado"
+                android:textSize="14sp"
+                android:textColor="#666666"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp"/>
+
+            <TextView
                 android:id="@+id/tvServerList"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="📡 Servidores configurados:\n   1. chidrobo.ddnsking.com\n   2. uesteban.ddnsking.com\n   3. jesucaracu.ddns.net"
-                android:textSize="13sp"
-                android:textColor="#666666"
+                android:text="📡 Modo: GPS → Bluetooth → ESP32 → Servidores"
+                android:textSize="12sp"
+                android:textColor="#999999"
                 android:lineSpacingExtra="2dp"/>
 
         </LinearLayout>
@@ -74,67 +84,20 @@
 
     </androidx.cardview.widget.CardView>
 
-    <!-- Configuration Card -->
-    <androidx.cardview.widget.CardView
-        android:id="@+id/configCard"
+    <!-- Bluetooth Scan Button -->
+    <Button
+        android:id="@+id/btnScanBluetooth"
         android:layout_width="0dp"
-        android:layout_height="wrap_content"
+        android:layout_height="56dp"
         android:layout_margin="16dp"
-        app:cardCornerRadius="12dp"
-        app:cardElevation="4dp"
+        android:text="🔍 Buscar y Conectar ESP32"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:backgroundTint="#2196F3"
+        app:cornerRadius="8dp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/locationCard">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="16dp"
-            android:background="@android:color/white">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="⚙️ CONFIGURACIÓN"
-                android:textStyle="bold"
-                android:textSize="14sp"
-                android:textColor="#333333"
-                android:layout_marginBottom="12dp"/>
-
-            <com.google.android.material.textfield.TextInputLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="Puerto UDP"
-                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-                android:layout_marginBottom="12dp">
-
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/etPort"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:inputType="number"
-                    android:text="5051"/>
-
-            </com.google.android.material.textfield.TextInputLayout>
-
-            <com.google.android.material.textfield.TextInputLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="Intervalo de envío (segundos)"
-                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
-
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/etSendInterval"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:inputType="number"
-                    android:text="10"/>
-
-            </com.google.android.material.textfield.TextInputLayout>
-
-        </LinearLayout>
-    </androidx.cardview.widget.CardView>
+        app:layout_constraintTop_toBottomOf="@id/locationCard"/>
 
     <!-- Control Buttons -->
     <LinearLayout
@@ -145,7 +108,7 @@
         android:layout_margin="16dp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/configCard">
+        app:layout_constraintTop_toBottomOf="@id/btnScanBluetooth">
 
         <Button
             android:id="@+id/send_location_btn"
@@ -162,7 +125,7 @@
             android:id="@+id/btnDisconnect"
             android:layout_width="match_parent"
             android:layout_height="56dp"
-            android:text="⏹️ Desconectar"
+            android:text="🔴 Desconectar Bluetooth"
             android:textSize="16sp"
             android:textStyle="bold"
             android:backgroundTint="#F44336"
@@ -189,7 +152,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:padding="12dp"
-            android:text="🔴 No conectado"
+            android:text="📡 Modo: Envío a ESP32 via Bluetooth"
             android:textSize="14sp"
             android:textStyle="bold"
             android:gravity="center"

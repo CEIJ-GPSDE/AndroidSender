@@ -1,47 +1,46 @@
 package com.example.sms
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.widget.*
 import androidx.activity.enableEdgeToEdge
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import kotlinx.coroutines.*
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
-import java.security.SecureRandom
+import java.io.IOException
+import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.*
-import javax.crypto.Cipher
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 
 class SendActivity : AppCompatActivity() {
 
     private lateinit var locationManager: LocationManager
     private lateinit var coordsTextView: TextView
-    private lateinit var etPort: EditText
-    private lateinit var etSendInterval: EditText
     private lateinit var sendLocationButton: Button
     private lateinit var btnDisconnect: Button
     private lateinit var btnClearLog: Button
     private lateinit var btnToggleLog: Button
+    private lateinit var btnScanBluetooth: Button
     private lateinit var tvStatus: TextView
     private lateinit var tvLog: TextView
     private lateinit var tvDeviceId: TextView
-    private lateinit var tvServerList: TextView
+    private lateinit var tvBluetoothStatus: TextView
     private lateinit var scrollView: ScrollView
     private var isLogVisible = true
 
@@ -49,30 +48,19 @@ class SendActivity : AppCompatActivity() {
     private var currentLocation: Location? = null
     private var phoneNumber: String = ""
     private var isConnected = false
-    private var isSendingPeriodically = false
+    private var isSendingToESP32 = false
     private var sendJob: Job? = null
+
+    // Bluetooth variables
+    private var bluetoothAdapter: BluetoothAdapter? = null
+    private var bluetoothSocket: BluetoothSocket? = null
+    private var outputStream: OutputStream? = null
+    private var connectedDevice: BluetoothDevice? = null
+    private val ESP32_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB") // Standard SPP UUID
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val LOCATION_PERMISSION_REQUEST_CODE = 1001
-
-    // ═══════════════════════════════════════════════════════════════
-    // SERVIDORES HARDCODEADOS
-    // ═══════════════════════════════════════════════════════════════
-    private val SERVERS = listOf(
-        "chidrobo.ddns.net",
-        "uesteban.ddnsking.com",
-        "jesucaracu.ddns.net"
-    )
-
-    // ═══════════════════════════════════════════════════════════════
-    // CONFIGURACIÓN DE CIFRADO AES-GCM
-    // ═══════════════════════════════════════════════════════════════
-    private val AES_KEY = byteArrayOf(
-        0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae.toByte(), 0xd2.toByte(), 0xa6.toByte(),
-        0xab.toByte(), 0xf7.toByte(), 0x15, 0x88.toByte(), 0x09, 0xcf.toByte(), 0x4f, 0x3c
-    )
-    private val GCM_TAG_LENGTH = 128
-    private val GCM_IV_LENGTH = 12
+    private val BLUETOOTH_PERMISSION_REQUEST_CODE = 1002
 
     private lateinit var deviceId: String
 
@@ -93,9 +81,11 @@ class SendActivity : AppCompatActivity() {
         initializeViews()
         setupClickListeners()
 
+        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        updateConnectionStatus("No conectado", false)
-        checkLocationPermission()
+
+        updateBluetoothStatus("No conectado", false)
+        checkPermissions()
     }
 
     private fun getOrCreateDeviceId(): String {
@@ -116,39 +106,27 @@ class SendActivity : AppCompatActivity() {
 
     private fun initializeViews() {
         coordsTextView = findViewById(R.id.coords_text)
-        etPort = findViewById(R.id.etPort)
-        etSendInterval = findViewById(R.id.etSendInterval)
         sendLocationButton = findViewById(R.id.send_location_btn)
         btnDisconnect = findViewById(R.id.btnDisconnect)
         btnClearLog = findViewById(R.id.btnClearLog)
         btnToggleLog = findViewById(R.id.btnToggleLog)
+        btnScanBluetooth = findViewById(R.id.btnScanBluetooth)
         tvStatus = findViewById(R.id.tvStatus)
         tvLog = findViewById(R.id.tvLog)
         tvDeviceId = findViewById(R.id.tvDeviceId)
-        tvServerList = findViewById(R.id.tvServerList)
+        tvBluetoothStatus = findViewById(R.id.tvBluetoothStatus)
         scrollView = findViewById(R.id.scrollView)
 
         tvDeviceId.text = "🆔 $deviceId"
-
-        // Mostrar lista de servidores
-        val serverListText = buildString {
-            append("📡 Servidores configurados:\n")
-            SERVERS.forEachIndexed { index, server ->
-                append("   ${index + 1}. $server\n")
-            }
-        }
-        tvServerList.text = serverListText
-
-        etPort.setText("5051")
-        etSendInterval.setText("10")
+        tvStatus.text = "📡 Modo: Envío a ESP32 via Bluetooth"
 
         sendLocationButton.isEnabled = false
-        sendLocationButton.text = "Obteniendo ubicación..."
+        sendLocationButton.text = "Esperando conexión BT..."
     }
 
     private fun setupClickListeners() {
         sendLocationButton.setOnClickListener {
-            if (isSendingPeriodically) {
+            if (isSendingToESP32) {
                 stopPeriodicSending()
             } else {
                 startPeriodicSending()
@@ -156,9 +134,7 @@ class SendActivity : AppCompatActivity() {
         }
 
         btnDisconnect.setOnClickListener {
-            stopPeriodicSending()
-            updateConnectionStatus("Desconectado", false)
-            addToLog("🔴 Desconectado por el usuario")
+            disconnectBluetooth()
         }
 
         btnClearLog.setOnClickListener {
@@ -168,6 +144,10 @@ class SendActivity : AppCompatActivity() {
         btnToggleLog.setOnClickListener {
             toggleLogVisibility()
         }
+
+        btnScanBluetooth.setOnClickListener {
+            scanAndConnectBluetooth()
+        }
     }
 
     private fun toggleLogVisibility() {
@@ -176,28 +156,146 @@ class SendActivity : AppCompatActivity() {
         btnToggleLog.text = if (isLogVisible) "Ocultar Log" else "Mostrar Log"
     }
 
-    private fun encryptMessage(plaintext: String): ByteArray {
+    private fun checkPermissions() {
+        val permissionsNeeded = mutableListOf<String>()
+
+        // Location permissions
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED) {
+            permissionsNeeded.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+
+        // Bluetooth permissions (depends on Android version)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
+                != PackageManager.PERMISSION_GRANTED) {
+                permissionsNeeded.add(Manifest.permission.BLUETOOTH_CONNECT)
+            }
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN)
+                != PackageManager.PERMISSION_GRANTED) {
+                permissionsNeeded.add(Manifest.permission.BLUETOOTH_SCAN)
+            }
+        }
+
+        if (permissionsNeeded.isNotEmpty()) {
+            ActivityCompat.requestPermissions(
+                this,
+                permissionsNeeded.toTypedArray(),
+                LOCATION_PERMISSION_REQUEST_CODE
+            )
+        } else {
+            startLocationUpdates()
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        if (requestCode == LOCATION_PERMISSION_REQUEST_CODE) {
+            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                startLocationUpdates()
+            } else {
+                coordsTextView.text = "⚠️ Se requieren permisos"
+                Toast.makeText(this, "Permisos requeridos", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun scanAndConnectBluetooth() {
+        if (bluetoothAdapter == null) {
+            Toast.makeText(this, "Bluetooth no disponible", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (!bluetoothAdapter!!.isEnabled) {
+            Toast.makeText(this, "Por favor, activa el Bluetooth", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         try {
-            val iv = ByteArray(GCM_IV_LENGTH)
-            SecureRandom().nextBytes(iv)
+            val pairedDevices: Set<BluetoothDevice>? = bluetoothAdapter!!.bondedDevices
 
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            val keySpec = SecretKeySpec(AES_KEY, "AES")
-            val gcmSpec = GCMParameterSpec(GCM_TAG_LENGTH, iv)
-            cipher.init(Cipher.ENCRYPT_MODE, keySpec, gcmSpec)
+            if (pairedDevices.isNullOrEmpty()) {
+                Toast.makeText(this, "No hay dispositivos emparejados", Toast.LENGTH_SHORT).show()
+                addToLog("⚠️ No hay dispositivos Bluetooth emparejados")
+                return
+            }
 
-            val ciphertextWithTag = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
+            val deviceNames = pairedDevices.map { "${it.name} (${it.address})" }.toTypedArray()
+            val devices = pairedDevices.toList()
 
-            val packet = ByteArray(iv.size + ciphertextWithTag.size)
-            System.arraycopy(iv, 0, packet, 0, iv.size)
-            System.arraycopy(ciphertextWithTag, 0, packet, iv.size, ciphertextWithTag.size)
+            AlertDialog.Builder(this)
+                .setTitle("Seleccionar ESP32")
+                .setItems(deviceNames) { _, which ->
+                    connectToDevice(devices[which])
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
 
-            Log.d("SendActivity", "Mensaje cifrado: ${packet.size} bytes")
-            return packet
+        } catch (e: SecurityException) {
+            Toast.makeText(this, "Permisos de Bluetooth requeridos", Toast.LENGTH_SHORT).show()
+            addToLog("❌ Error de permisos Bluetooth")
+        }
+    }
 
-        } catch (e: Exception) {
-            Log.e("SendActivity", "Error cifrando mensaje: ${e.message}", e)
-            throw e
+    private fun connectToDevice(device: BluetoothDevice) {
+        addToLog("════════════════════════════════════════")
+        addToLog("🔵 Conectando a ${device.name}")
+        addToLog("📍 MAC: ${device.address}")
+
+        scope.launch(Dispatchers.IO) {
+            try {
+                bluetoothSocket = device.createRfcommSocketToServiceRecord(ESP32_UUID)
+                bluetoothSocket?.connect()
+                outputStream = bluetoothSocket?.outputStream
+                connectedDevice = device
+
+                withContext(Dispatchers.Main) {
+                    updateBluetoothStatus("Conectado: ${device.name}", true)
+                    addToLog("✅ Conexión Bluetooth establecida")
+                    addToLog("════════════════════════════════════════")
+                    sendLocationButton.isEnabled = true
+                    sendLocationButton.text = "▶️ Iniciar Transmisión"
+                    btnScanBluetooth.visibility = Button.GONE
+                }
+
+            } catch (e: IOException) {
+                withContext(Dispatchers.Main) {
+                    updateBluetoothStatus("Error de conexión", false)
+                    addToLog("❌ Error conectando: ${e.message}")
+                    Toast.makeText(this@SendActivity, "Error al conectar", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: SecurityException) {
+                withContext(Dispatchers.Main) {
+                    addToLog("❌ Error de permisos: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun disconnectBluetooth() {
+        stopPeriodicSending()
+
+        scope.launch(Dispatchers.IO) {
+            try {
+                outputStream?.close()
+                bluetoothSocket?.close()
+                outputStream = null
+                bluetoothSocket = null
+                connectedDevice = null
+
+                withContext(Dispatchers.Main) {
+                    updateBluetoothStatus("Desconectado", false)
+                    addToLog("🔴 Bluetooth desconectado")
+                    sendLocationButton.isEnabled = false
+                    sendLocationButton.text = "Esperando conexión BT..."
+                    btnScanBluetooth.visibility = Button.VISIBLE
+                }
+            } catch (e: IOException) {
+                withContext(Dispatchers.Main) {
+                    addToLog("⚠️ Error al desconectar: ${e.message}")
+                }
+            }
         }
     }
 
@@ -207,40 +305,34 @@ class SendActivity : AppCompatActivity() {
             return
         }
 
-        val port = etPort.text.toString().toIntOrNull() ?: 5051
-        val intervalSeconds = etSendInterval.text.toString().toIntOrNull() ?: 10
-
-        if (intervalSeconds < 1) {
-            Toast.makeText(this, "El intervalo debe ser al menos 1 segundo", Toast.LENGTH_SHORT).show()
+        if (bluetoothSocket == null || !bluetoothSocket!!.isConnected) {
+            Toast.makeText(this, "Bluetooth no conectado", Toast.LENGTH_SHORT).show()
             return
         }
 
-        isSendingPeriodically = true
+        isSendingToESP32 = true
         updateSendingUI(true)
 
         addToLog("════════════════════════════════════════")
-        addToLog("🚀 Iniciando transmisión cifrada")
+        addToLog("🚀 Iniciando transmisión GPS a ESP32")
         addToLog("🆔 Device ID: $deviceId")
-        addToLog("⏱️  Intervalo: $intervalSeconds segundos")
-        addToLog("🔐 Cifrado: AES-128-GCM")
-        addToLog("🌐 Puerto: $port")
-        addToLog("📡 ${SERVERS.size} servidores activos")
+        addToLog("🔵 Vía Bluetooth")
         addToLog("════════════════════════════════════════")
 
         sendJob = scope.launch {
             var sendCount = 0
-            while (isSendingPeriodically) {
+            while (isSendingToESP32) {
                 try {
                     sendCount++
                     currentLocation?.let { location ->
                         runOnUiThread {
                             addToLog("\n📤 Envío #$sendCount")
                         }
-                        sendEncryptedLocationToServers(port, location, sendCount)
+                        sendLocationViaBluetooth(location, sendCount)
                     }
 
-                    var remainingSeconds = intervalSeconds
-                    while (remainingSeconds > 0 && isSendingPeriodically) {
+                    var remainingSeconds = 1 // Enviar cada 2 segundos para mejor actualización
+                    while (remainingSeconds > 0 && isSendingToESP32) {
                         runOnUiThread {
                             sendLocationButton.text = "⏳ Próximo en ${remainingSeconds}s"
                         }
@@ -249,105 +341,58 @@ class SendActivity : AppCompatActivity() {
                     }
                 } catch (e: Exception) {
                     runOnUiThread {
-                        addToLog("❌ Error en envío periódico: ${e.message}")
+                        addToLog("❌ Error en envío: ${e.message}")
                     }
-                    break
+                    if (e is IOException) {
+                        // Connection lost
+                        runOnUiThread {
+                            disconnectBluetooth()
+                            Toast.makeText(this@SendActivity, "Conexión Bluetooth perdida", Toast.LENGTH_SHORT).show()
+                        }
+                        break
+                    }
                 }
             }
         }
     }
 
-    private suspend fun sendEncryptedLocationToServers(
-        port: Int,
-        location: Location,
-        sendCount: Int
-    ) {
+    private suspend fun sendLocationViaBluetooth(location: Location, sendCount: Int) {
         withContext(Dispatchers.IO) {
             try {
                 val lat = location.latitude
                 val lng = location.longitude
 
-                val plaintext = "$deviceId,%.6f,%.6f".format(Locale.US, lat, lng)
+                // Format: deviceID,latitude,longitude\n
+                val message = "$deviceId,%.6f,%.6f\n".format(Locale.US, lat, lng)
 
                 runOnUiThread {
                     addToLog("   📍 Ubicación: ${"%.6f".format(lat)}, ${"%.6f".format(lng)}")
-                    addToLog("   🔒 Cifrando mensaje...")
+                    addToLog("   📤 Enviando a ESP32...")
                 }
 
-                val encryptedPacket = encryptMessage(plaintext)
+                outputStream?.write(message.toByteArray())
+                outputStream?.flush()
 
                 runOnUiThread {
-                    addToLog("   ✅ Cifrado completado (${encryptedPacket.size} bytes)")
+                    addToLog("   ✅ Enviado exitosamente (${message.length} bytes)")
                 }
 
-                val results = SERVERS.mapIndexed { index, server ->
-                    async {
-                        val serverName = "Servidor ${index + 1}"
-                        serverName to sendEncryptedUdpPacket(serverName, server, port, encryptedPacket)
-                    }
-                }.awaitAll()
-
-                val successful = results.filter { it.second }
-                val failed = results.filter { !it.second }
-
+            } catch (e: IOException) {
                 runOnUiThread {
-                    when {
-                        successful.size == results.size -> {
-                            addToLog("   ✅ Envío exitoso a ${successful.size}/${results.size} servidores")
-                        }
-                        successful.isNotEmpty() -> {
-                            addToLog("   ⚠️  Envío parcial: ${successful.size}/${results.size} servidores")
-                            failed.forEach {
-                                addToLog("      ❌ ${it.first} falló")
-                            }
-                        }
-                        else -> {
-                            addToLog("   ❌ Fallo total en todos los servidores")
-                        }
-                    }
+                    addToLog("   ❌ Error de envío: ${e.message}")
                 }
-
+                throw e
             } catch (e: Exception) {
                 runOnUiThread {
-                    addToLog("   ❌ Error crítico: ${e.message}")
-                    Log.e("SendActivity", "Error en envío cifrado", e)
+                    addToLog("   ❌ Error: ${e.message}")
+                    Log.e("SendActivity", "Error en envío Bluetooth", e)
                 }
-            }
-        }
-    }
-
-    private suspend fun sendEncryptedUdpPacket(
-        serverName: String,
-        host: String,
-        port: Int,
-        encryptedData: ByteArray
-    ): Boolean {
-        var socket: DatagramSocket? = null
-        return try {
-            socket = DatagramSocket()
-            socket.soTimeout = 5000
-
-            val address = InetAddress.getByName(host)
-            val packet = DatagramPacket(encryptedData, encryptedData.size, address, port)
-
-            socket.send(packet)
-
-            Log.d("SendActivity", "Paquete enviado a $serverName ($host:$port): ${encryptedData.size} bytes")
-            true
-        } catch (e: Exception) {
-            Log.e("SendActivity", "Error enviando a $serverName: ${e.message}", e)
-            false
-        } finally {
-            try {
-                socket?.close()
-            } catch (e: Exception) {
-                // Ignore
             }
         }
     }
 
     private fun stopPeriodicSending() {
-        isSendingPeriodically = false
+        isSendingToESP32 = false
         sendJob?.cancel()
         sendJob = null
         updateSendingUI(false)
@@ -358,43 +403,11 @@ class SendActivity : AppCompatActivity() {
         if (sending) {
             sendLocationButton.text = "⏹️ Detener Transmisión"
             sendLocationButton.setBackgroundColor(resources.getColor(android.R.color.holo_red_dark, null))
-
-            etPort.isEnabled = false
-            etSendInterval.isEnabled = false
             btnDisconnect.visibility = Button.VISIBLE
         } else {
             sendLocationButton.text = "▶️ Iniciar Transmisión"
             sendLocationButton.setBackgroundColor(resources.getColor(android.R.color.holo_green_dark, null))
-
-            etPort.isEnabled = true
-            etSendInterval.isEnabled = true
             btnDisconnect.visibility = Button.GONE
-        }
-    }
-
-    private fun checkLocationPermission() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-            == PackageManager.PERMISSION_GRANTED) {
-            startLocationUpdates()
-        } else {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),
-                LOCATION_PERMISSION_REQUEST_CODE
-            )
-        }
-    }
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-
-        if (requestCode == LOCATION_PERMISSION_REQUEST_CODE) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                startLocationUpdates()
-            } else {
-                coordsTextView.text = "⚠️ Se requieren permisos de ubicación"
-                Toast.makeText(this, "Permisos de ubicación requeridos", Toast.LENGTH_LONG).show()
-            }
         }
     }
 
@@ -403,7 +416,6 @@ class SendActivity : AppCompatActivity() {
             override fun onLocationChanged(location: Location) {
                 currentLocation = location
                 updateLocationDisplay(location)
-                enableSendButton()
             }
 
             override fun onProviderEnabled(provider: String) {
@@ -413,7 +425,6 @@ class SendActivity : AppCompatActivity() {
             override fun onProviderDisabled(provider: String) {
                 Log.d("SendActivity", "Provider disabled: $provider")
                 coordsTextView.text = "⚠️ GPS deshabilitado"
-                sendLocationButton.isEnabled = false
                 stopPeriodicSending()
             }
         }
@@ -424,7 +435,7 @@ class SendActivity : AppCompatActivity() {
             if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 locationManager.requestLocationUpdates(
                     LocationManager.GPS_PROVIDER,
-                    2000L,
+                    1000L, // Update every second
                     1f,
                     locationListener!!
                 )
@@ -433,7 +444,7 @@ class SendActivity : AppCompatActivity() {
             if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 locationManager.requestLocationUpdates(
                     LocationManager.NETWORK_PROVIDER,
-                    2000L,
+                    1000L,
                     1f,
                     locationListener!!
                 )
@@ -454,19 +465,11 @@ class SendActivity : AppCompatActivity() {
             lastKnownLocation?.let { location ->
                 currentLocation = location
                 updateLocationDisplay(location)
-                enableSendButton()
             }
 
         } catch (e: SecurityException) {
             coordsTextView.text = "❌ Error de permisos"
             Log.e("SendActivity", "Security exception: ${e.message}")
-        }
-    }
-
-    private fun enableSendButton() {
-        sendLocationButton.isEnabled = true
-        if (!isSendingPeriodically) {
-            sendLocationButton.text = "▶️ Iniciar Transmisión"
         }
     }
 
@@ -482,8 +485,8 @@ class SendActivity : AppCompatActivity() {
         val locationText = buildString {
             append("📍 ${"%.6f".format(lat)}, ${"%.6f".format(lng)}")
             append(" | ⏱️ $formattedTime")
-            if (isSendingPeriodically) {
-                append(" | 🟢 Transmitiendo")
+            if (isSendingToESP32) {
+                append(" | 🔵 Transmitiendo")
             } else {
                 append(" | 🔴 Detenido")
             }
@@ -493,14 +496,14 @@ class SendActivity : AppCompatActivity() {
         Log.d("SendActivity", "Location updated: Lat=$lat, Lng=$lng")
     }
 
-    private fun updateConnectionStatus(status: String, connected: Boolean) {
+    private fun updateBluetoothStatus(status: String, connected: Boolean) {
         isConnected = connected
-        tvStatus.text = if (connected) "🟢 $status" else "🔴 $status"
-        tvStatus.setTextColor(
+        tvBluetoothStatus.text = if (connected) "🔵 $status" else "⚪ $status"
+        tvBluetoothStatus.setTextColor(
             if (connected)
-                resources.getColor(android.R.color.holo_green_dark, null)
+                resources.getColor(android.R.color.holo_blue_dark, null)
             else
-                resources.getColor(android.R.color.holo_red_dark, null)
+                resources.getColor(android.R.color.darker_gray, null)
         )
     }
 
@@ -509,7 +512,7 @@ class SendActivity : AppCompatActivity() {
         val logEntry = "[$timestamp] $message\n"
         tvLog.append(logEntry)
 
-        if (!isLogVisible && isSendingPeriodically) {
+        if (!isLogVisible && isSendingToESP32) {
             toggleLogVisibility()
         }
 
@@ -518,78 +521,10 @@ class SendActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun testConnections(port: Int) {
-        withContext(Dispatchers.IO) {
-            try {
-                runOnUiThread {
-                    updateConnectionStatus("Probando conexiones...", false)
-                    addToLog("🔍 Iniciando prueba de conexión cifrada")
-                    addToLog("📡 Probando ${SERVERS.size} servidores...")
-                }
-
-                val results = SERVERS.mapIndexed { index, server ->
-                    async {
-                        val serverName = "Servidor ${index + 1}"
-                        testEncryptedConnection(serverName, server, port)
-                    }
-                }.awaitAll()
-
-                val successfulTests = results.count { it }
-                val totalTests = results.size
-
-                runOnUiThread {
-                    when {
-                        successfulTests == totalTests -> {
-                            updateConnectionStatus("Todos los servidores OK ($totalTests/$totalTests)", true)
-                            addToLog("✅ Prueba exitosa: $totalTests/$totalTests servidores")
-                        }
-                        successfulTests > 0 -> {
-                            updateConnectionStatus("Conexión parcial ($successfulTests/$totalTests)", false)
-                            addToLog("⚠️  Prueba parcial: $successfulTests/$totalTests servidores")
-                        }
-                        else -> {
-                            updateConnectionStatus("Sin conexión (0/$totalTests)", false)
-                            addToLog("❌ Todas las pruebas fallaron")
-                        }
-                    }
-                }
-
-            } catch (e: Exception) {
-                runOnUiThread {
-                    updateConnectionStatus("Error en prueba", false)
-                    addToLog("❌ Error: ${e.message}")
-                }
-            }
-        }
-    }
-
-    private suspend fun testEncryptedConnection(serverName: String, host: String, port: Int): Boolean {
-        return try {
-            val testMessage = "TEST_$deviceId"
-            val encryptedPacket = encryptMessage(testMessage)
-
-            val result = sendEncryptedUdpPacket(serverName, host, port, encryptedPacket)
-
-            runOnUiThread {
-                if (result) {
-                    addToLog("   ✅ $serverName ($host): OK")
-                } else {
-                    addToLog("   ❌ $serverName ($host): FAIL")
-                }
-            }
-
-            result
-        } catch (e: Exception) {
-            runOnUiThread {
-                addToLog("   ❌ $serverName: ${e.message}")
-            }
-            false
-        }
-    }
-
     override fun onDestroy() {
         super.onDestroy()
         stopPeriodicSending()
+        disconnectBluetooth()
         locationListener?.let {
             locationManager.removeUpdates(it)
         }
